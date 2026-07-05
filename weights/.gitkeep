@@ -1,0 +1,2 @@
+# This directory stores pretrained and trained model weights (.pt, .onnx, .engine).
+# Placeholder — weights will be saved here during training (Phases 6–8).

@@ -1,0 +1,55 @@
+# ============================================================================
+# TriNetra-AMRF — Python Dependencies
+# ============================================================================
+# Install: pip install -r requirements.txt
+# Note: For CUDA-enabled PyTorch, install from https://pytorch.org/get-started
+#        pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+# ============================================================================
+
+# ── Core Deep Learning ──────────────────────────────────────────────────────
+torch>=2.2.0                    # PyTorch with CUDA support
+torchvision>=0.17.0             # Vision models & transforms
+torchmetrics>=1.3.0             # Training metrics (accuracy, mAP, etc.)
+
+# ── Computer Vision & Image Processing ──────────────────────────────────────
+opencv-python>=4.9.0            # Image I/O, transforms, video capture
+albumentations>=1.4.0           # Advanced image augmentations
+Pillow>=10.2.0                  # PIL image handling
+scikit-image>=0.22.0            # Image processing utilities
+
+# ── Object Detection ────────────────────────────────────────────────────────
+ultralytics>=8.1.0              # YOLOv8/v11 detection framework
+# mmdet>=3.3.0                  # MMDetection — uncomment if needed (heavy dependency)
+# mmengine>=0.10.0              # Required by MMDetection
+
+# ── Tracking ────────────────────────────────────────────────────────────────
+deep-sort-realtime>=1.3.2       # DeepSORT real-time tracker
+# bytetracker>=0.3.0            # ByteTrack (install from source if needed)
+
+# ── Scientific Computing ───────────────────────────────────────────────────
+numpy>=1.26.0                   # Numerical arrays
+scipy>=1.12.0                   # Scientific algorithms
+pandas>=2.2.0                   # Tabular data processing
+
+# ── Visualization & Logging ─────────────────────────────────────────────────
+matplotlib>=3.8.0               # Static plots & figure export
+plotly>=5.18.0                  # Interactive visualizations
+tensorboard>=2.16.0             # Training dashboards
+
+# ── Evaluation & Metrics ───────────────────────────────────────────────────
+pycocotools>=2.0.7              # COCO evaluation metrics
+scikit-learn>=1.4.0             # Classification metrics, clustering
+
+# ── Serving & Deployment ───────────────────────────────────────────────────
+fastapi>=0.109.0                # REST API framework
+uvicorn[standard]>=0.27.0       # ASGI server for FastAPI
+onnxruntime-gpu>=1.17.0         # ONNX GPU inference runtime
+# tensorrt>=10.0.0              # TensorRT — uncomment if NVIDIA TensorRT SDK installed
+
+# ── GPU Utilities ───────────────────────────────────────────────────────────
+GPUtil>=1.4.0                   # GPU utilization monitoring
+pynvml>=11.5.0                  # NVIDIA Management Library bindings
+
+# ── Configuration ──────────────────────────────────────────────────────────
+pyyaml>=6.0.1                   # YAML config parsing
+python-dotenv>=1.0.0            # .env file support

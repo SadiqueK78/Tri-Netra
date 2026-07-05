@@ -1,0 +1,95 @@
+# ============================================================================
+# TriNetra-AMRF — Default Configuration
+# ============================================================================
+# This file defines default paths, hyperparameters, and runtime settings.
+# Override per-experiment by creating a copy or using CLI args.
+# ============================================================================
+
+# ── Project Metadata ────────────────────────────────────────────────────────
+project:
+  name: "TriNetra-AMRF"
+  version: "0.1.0"
+  description: "Dual-Modality Surveillance Framework"
+
+# ── Dataset Paths ───────────────────────────────────────────────────────────
+datasets:
+  visible_dir: "datasets/visible/"
+  thermal_dir: "datasets/thermal/"
+  annotations_dir: "datasets/annotations/"
+  calibration_dir: "datasets/calibration/"
+  # train/val/test split ratios
+  split_ratios:
+    train: 0.7
+    val: 0.15
+    test: 0.15
+
+# ── Model Weights ──────────────────────────────────────────────────────────
+weights:
+  save_dir: "weights/"
+  detector_checkpoint: null       # Path to detector .pt file
+  fusion_checkpoint: null         # Path to fusion module .pt file
+  tracker_checkpoint: null        # Path to tracker .pt file
+  risk_model_checkpoint: null     # Path to risk model .pt file
+
+# ── Preprocessing ──────────────────────────────────────────────────────────
+preprocessing:
+  alignment:
+    method: "homography"          # Options: homography, affine, rigid
+    reference_modality: "visible" # Which modality is the spatial reference
+  denoise:
+    method: "bilateral"           # Options: bilateral, nlm, gaussian
+    strength: 10
+  normalize:
+    method: "clahe"               # Options: clahe, minmax, zscore
+    clip_limit: 2.0
+    tile_grid_size: [8, 8]
+
+# ── Detection ──────────────────────────────────────────────────────────────
+detection:
+  model: "yolov8m"                # Ultralytics model variant
+  input_size: [640, 640]
+  confidence_threshold: 0.25
+  iou_threshold: 0.45
+  num_classes: 10                 # TODO: update per dataset
+
+# ── Fusion ─────────────────────────────────────────────────────────────────
+fusion:
+  strategy: "attention"           # Options: attention, concatenation, gated
+  feature_dim: 256
+
+# ── Tracking ───────────────────────────────────────────────────────────────
+tracking:
+  algorithm: "deepsort"           # Options: deepsort, bytetrack
+  max_age: 30
+  min_hits: 3
+  iou_threshold: 0.3
+
+# ── Risk Assessment ───────────────────────────────────────────────────────
+risk_model:
+  num_threat_levels: 5            # 1 (benign) → 5 (critical)
+  temporal_window: 30             # Frames of history for behaviour analysis
+
+# ── Training ───────────────────────────────────────────────────────────────
+training:
+  batch_size: 16
+  num_workers: 4
+  epochs: 100
+  learning_rate: 0.001
+  optimizer: "adamw"
+  scheduler: "cosine"
+  early_stopping_patience: 15
+  mixed_precision: true           # FP16 training via torch.cuda.amp
+  log_dir: "runs/"
+
+# ── Inference ──────────────────────────────────────────────────────────────
+inference:
+  device: "cuda:0"                # GPU device; falls back to CPU if unavailable
+  batch_size: 1
+  use_onnx: false
+  use_tensorrt: false
+
+# ── API Server ─────────────────────────────────────────────────────────────
+server:
+  host: "0.0.0.0"
+  port: 8000
+  reload: true
