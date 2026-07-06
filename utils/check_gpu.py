@@ -55,7 +55,7 @@ def check_torch_cuda():
 
     for i in range(num_gpus):
         props = torch.cuda.get_device_properties(i)
-        mem_total = props.total_mem / (1024 ** 3)  # Convert to GB
+        mem_total = props.total_memory / (1024 ** 3)  # Convert to GB
         print(f"  ── GPU {i} ──────────────────────────────────────────────")
         print(f"     Name              : {props.name}")
         print(f"     Compute Capability: {props.major}.{props.minor}")
@@ -146,6 +146,9 @@ def check_gputil():
         import pynvml
         pynvml.nvmlInit()
         driver_ver = pynvml.nvmlSystemGetDriverVersion()
+        if isinstance(driver_ver, bytes):
+           driver_ver = driver_ver.decode()
+
         print(f"  pynvml driver version: {driver_ver}")
         device_count = pynvml.nvmlDeviceGetCount()
         print(f"  pynvml device count  : {device_count}")
