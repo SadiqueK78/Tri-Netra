@@ -1,6 +1,11 @@
 # Virtual environments
 env/
 venv/
+# Dataset
+datasets/LLVIP/
+datasets/thermal/
+datasets/visible/
+
 
 # Python cache
 __pycache__/

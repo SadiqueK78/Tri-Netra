@@ -13,15 +13,77 @@ project:
 
 # ── Dataset Paths ───────────────────────────────────────────────────────────
 datasets:
+  # Canonical (processed) directories — produced by datasets/split_dataset.py
   visible_dir: "datasets/visible/"
   thermal_dir: "datasets/thermal/"
   annotations_dir: "datasets/annotations/"
   calibration_dir: "datasets/calibration/"
-  # train/val/test split ratios
+
+  # Active dataset source (llvip, kaist, m3fd, flir_adas)
+  active_source: "llvip"
+
+  # Per-source raw locations & metadata. Each script reads the block that
+  # matches `active_source`.
+  sources:
+    llvip:
+      root: "datasets/LLVIP/"
+      visible_subdir: "visible"        # datasets/LLVIP/visible/{train,test}
+      thermal_subdir: "infrared"       # datasets/LLVIP/infrared/{train,test}
+      annotations_subdir: "Annotations"  # flat VOC XML (both splits)
+      annotation_format: "voc"         # voc | kaist | coco
+      # LLVIP ships an official train/test split; these are the folder names.
+      official_train_dir: "train"
+      official_test_dir: "test"
+      # LLVIP only labels pedestrians -> map to unified `person` (id 1).
+      class_map:
+        person: 1
+
+  # Master COCO JSON produced by convert_annotations.py (pre-split).
+  master_annotations: "datasets/annotations/instances_all.json"
+
+  # Unified category mapping (shared across all sources).
+  categories:
+    - {id: 1, name: "person",     supercategory: "human"}
+    - {id: 2, name: "car",        supercategory: "vehicle"}
+    - {id: 3, name: "bus",        supercategory: "vehicle"}
+    - {id: 4, name: "truck",      supercategory: "vehicle"}
+    - {id: 5, name: "motorcycle", supercategory: "vehicle"}
+    - {id: 6, name: "cyclist",    supercategory: "human"}
+
+  # Image properties. LLVIP native resolution is 1280x1024; the model input
+  # size below is what the DataLoader resizes to (width, height).
+  native_size: [1280, 1024]
+  image_size: [640, 512]
+
+  # Augmentation settings (consumed by datasets/augmentations.py).
+  augmentation:
+    horizontal_flip_prob: 0.5
+    rotation_limit: 15
+    random_resized_crop: true
+    crop_scale: [0.6, 1.0]
+    color_jitter: true
+    thermal_gauss_noise: true
+    mosaic: false                      # Enable in later phases
+
+  # ImageNet stats for the RGB (visible) branch; single-channel stats for thermal.
+  normalize:
+    visible_mean: [0.485, 0.456, 0.406]
+    visible_std:  [0.229, 0.224, 0.225]
+    thermal_mean: [0.5]
+    thermal_std:  [0.5]
+
+  # Reproducibility.
+  seed: 42
+
+  # train/val/test split ratios. For LLVIP the official test split is
+  # preserved as-is; `val` is carved out of the official train split using
+  # the train:val proportion below (0.7 : 0.15 -> val = 15/85 of train).
   split_ratios:
     train: 0.7
     val: 0.15
     test: 0.15
+  # When a source has an official test split, keep it and only split train/val.
+  respect_official_test: true
 
 # ── Model Weights ──────────────────────────────────────────────────────────
 weights:
@@ -31,18 +93,36 @@ weights:
   tracker_checkpoint: null        # Path to tracker .pt file
   risk_model_checkpoint: null     # Path to risk model .pt file
 
-# ── Preprocessing ──────────────────────────────────────────────────────────
+# ── Preprocessing (Phase 3 — Layer 2: Preprocessing & Reliability) ───────────
 preprocessing:
   alignment:
     method: "homography"          # Options: homography, affine, rigid
     reference_modality: "visible" # Which modality is the spatial reference
+    identity_ok: true             # LLVIP pre-aligned -> skip warp (pass-through)
   denoise:
-    method: "bilateral"           # Options: bilateral, nlm, gaussian
-    strength: 10
+    method: "bilateral"           # Options: bilateral, nlm, gaussian, guided
+    strength: 10                  # bilateral sigmaColor/sigmaSpace; nlm h
+    bilateral_d: 5                # neighborhood diameter (mild by default)
+    apply_to: ["visible", "thermal"]
   normalize:
-    method: "clahe"               # Options: clahe, minmax, zscore
+    method: "clahe"               # Options: clahe, minmax, zscore, percentile_clip
     clip_limit: 2.0
     tile_grid_size: [8, 8]
+    thermal_percentile_clip: [1, 99]  # suppress hot/cold outliers before rescale
+
+  # Thermal Reliability Confidence — the novel Layer-2 output that drives
+  # adaptive fusion in Phase 4 (fusion multiplies the thermal branch by trc).
+  trc:
+    enabled: true
+    components:                   # per-cue weights (renormalized over enabled)
+      contrast:      0.2          # histogram entropy (flat/saturated -> low)
+      gradient:      0.2          # Laplacian variance (blur/defocus -> low)
+      saturation:    0.2          # clipped-pixel fraction (sensor clip -> low)
+      mutual_info:   0.2          # RGB<->IR MI (thermal crossover -> low)
+      align_error:   0.2          # reprojection error (misalignment -> low)
+    spatial_map: false            # true -> per-region trc_map for Phase 4
+    grid: 8                       # trc_map tiling (grid x grid) when spatial_map
+    mode: "online"                # online | offline_cache
 
 # ── Detection ──────────────────────────────────────────────────────────────
 detection:
@@ -50,7 +130,7 @@ detection:
   input_size: [640, 640]
   confidence_threshold: 0.25
   iou_threshold: 0.45
-  num_classes: 10                 # TODO: update per dataset
+  num_classes: 6                  # Unified categories (see datasets.categories)
 
 # ── Fusion ─────────────────────────────────────────────────────────────────
 fusion:
