@@ -1,6 +1,7 @@
 # Phase 4 — Adaptive Cross-Modal Fusion (TRC-Gated)
 
-> Status: 🔲 **Planned** (not yet implemented)
+> Status: ✅ **Implemented** (validated via `utils/check_fusion.py` — shapes,
+> TRC-effect, grad-flow, param-count, and a real val batch end-to-end)
 > Prereq: ✅ Phase 2 (data) + ✅ Phase 3 (preprocessing & TRC) — see
 > [`PHASE2_IMPLEMENTATION.md`](PHASE2_IMPLEMENTATION.md) and
 > [`PHASE3_IMPLEMENTATION.md`](PHASE3_IMPLEMENTATION.md).

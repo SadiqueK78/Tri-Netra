@@ -132,10 +132,24 @@ detection:
   iou_threshold: 0.45
   num_classes: 6                  # Unified categories (see datasets.categories)
 
-# ── Fusion ─────────────────────────────────────────────────────────────────
+# ── Fusion (Phase 4 — Layer 3: Adaptive Cross-Modal Fusion) ────────────────
 fusion:
-  strategy: "attention"           # Options: attention, concatenation, gated
-  feature_dim: 256
+  strategy: "gated"               # gated | concatenation | attention
+  scales: ["P3", "P4", "P5"]      # backbone taps to fuse (strides 8/16/32)
+  trc_gate:
+    enabled: true                 # multiply thermal branch by trc
+    learnable_alpha: true         # wrap gate in a learnable scalar (init 1.0)
+    spatial: false                # true -> use Phase 3 trc_map per region
+    residual_visible: true        # fused = P_vis + block(trc*P_thr) (safe default)
+  backbone:
+    base_model: "weights/yolov8m.pt"  # pretrained COCO weights to load
+    thermal_warm_start: true      # seed thermal backbone from visible weights
+    thermal_stem_init: "mean3ch"  # mean3ch | random
+  train_schedule:
+    stage1_freeze: ["visible_backbone", "neck", "head"]
+    stage1_epochs: 20
+    stage2_unfreeze: ["neck", "head"]   # [] to skip stage 2
+    stage2_lr: 1.0e-4
 
 # ── Tracking ───────────────────────────────────────────────────────────────
 tracking:

@@ -1,12 +1,14 @@
 """
-TriNetra-AMRF — Object Detection Models
-==========================================
+TriNetra-AMRF — Object Detection Models (Layer 4)
+==================================================
 
-Multi-scale object detection architectures for dual-modality surveillance.
-Planned models:
-  - YOLOv8/v11 with modified input head for 6-channel (RGB+T) input
-  - Feature Pyramid Network (FPN) for multi-scale detection
-  - Optional MMDetection-based detectors
+Multi-scale object detection architectures for dual-modality surveillance:
+  - FusionDetector — assembled dual-modal detector (Phase 4): TRC-gated
+    mid-fusion feeding a pretrained YOLOv8 neck + head.
 
-# TODO: implement detector architectures in Phase 5–6
+Phase 5 adds the training loop, loss wiring, and mAP evaluation.
 """
+
+from .fusion_detector import FusionDetector
+
+__all__ = ["FusionDetector"]
