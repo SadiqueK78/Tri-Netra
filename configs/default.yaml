@@ -65,12 +65,18 @@ datasets:
     thermal_gauss_noise: true
     mosaic: false                      # Enable in later phases
 
-  # ImageNet stats for the RGB (visible) branch; single-channel stats for thermal.
+  # Phase 5: the detector is a COCO-pretrained ultralytics YOLOv8 whose frozen
+  # backbone was trained on plain 0..1 pixels — NOT ImageNet-standardized ones.
+  # Feeding it ImageNet stats shifts the input ~2 sigma off distribution and the
+  # frozen backbone produces zero usable detections (measured: 0 person dets on
+  # a val batch vs. 3-5 with 0..1 input). Identity stats == a plain /255 scale.
+  # The thermal branch matches, because ThermalStem is warm-started by averaging
+  # the pretrained 3-channel stem, which expects the same 0..1 range.
   normalize:
-    visible_mean: [0.485, 0.456, 0.406]
-    visible_std:  [0.229, 0.224, 0.225]
-    thermal_mean: [0.5]
-    thermal_std:  [0.5]
+    visible_mean: [0.0, 0.0, 0.0]
+    visible_std:  [1.0, 1.0, 1.0]
+    thermal_mean: [0.0]
+    thermal_std:  [1.0]
 
   # Reproducibility.
   seed: 42
@@ -89,7 +95,7 @@ datasets:
 weights:
   save_dir: "weights/"
   detector_checkpoint: null       # Path to detector .pt file
-  fusion_checkpoint: null         # Path to fusion module .pt file
+  fusion_checkpoint: null         # set to "weights/fusion/best.pt" once trained
   tracker_checkpoint: null        # Path to tracker .pt file
   risk_model_checkpoint: null     # Path to risk model .pt file
 
@@ -127,10 +133,13 @@ preprocessing:
 # ── Detection ──────────────────────────────────────────────────────────────
 detection:
   model: "yolov8m"                # Ultralytics model variant
-  input_size: [640, 640]
+  input_size: [640, 512]          # match datasets.image_size (W, H)
   confidence_threshold: 0.25
   iou_threshold: 0.45
-  num_classes: 6                  # Unified categories (see datasets.categories)
+  num_classes: 6                  # Unified ids (the head stays 80-class COCO)
+  # Phase 5 Option A: keep the frozen 80-class COCO head; map unified category
+  # ids to COCO class indices (person=1 -> COCO 0). Eval filters to these.
+  class_id_map: {1: 0}
 
 # ── Fusion (Phase 4 — Layer 3: Adaptive Cross-Modal Fusion) ────────────────
 fusion:
@@ -170,10 +179,15 @@ training:
   epochs: 100
   learning_rate: 0.001
   optimizer: "adamw"
+  weight_decay: 0.0005
+  grad_clip_norm: 10.0
+  loss_gains: {box: 7.5, cls: 0.5, dfl: 1.5}   # ultralytics v8DetectionLoss defaults
+  warmup_epochs: 3                # linear LR warmup (Stage 2)
   scheduler: "cosine"
   early_stopping_patience: 15
   mixed_precision: true           # FP16 training via torch.cuda.amp
   log_dir: "runs/"
+  checkpoint_dir: "weights/fusion/"
 
 # ── Inference ──────────────────────────────────────────────────────────────
 inference:

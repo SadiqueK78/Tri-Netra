@@ -19,11 +19,17 @@ Sanity-check the TRC-gated fusion detector before Phase 5 training:
   * ``count_params``     — print trainable vs frozen parameter counts.
   * ``check_dataloader`` — pull one real batch from the Phase 3 val/test loader
                            and run it end-to-end through the detector.
+  * ``check_loss``       — Phase 5 smoke check: wire ``v8DetectionLoss`` via
+                           training/loss_adapter, run one batch (real if
+                           ``--split`` given, else synthetic), assert the loss
+                           is finite and the Stage-1 freeze contract still
+                           holds after loss wiring.
 
 Usage:
     python utils/check_fusion.py                       # all model-only tests
     python utils/check_fusion.py --test trc_effect
     python utils/check_fusion.py --test grad_flow
+    python utils/check_fusion.py --test loss --split val       # Phase 5 §10.2
     python utils/check_fusion.py --split val --batch-size 2   # + real batch
 """
 
@@ -180,7 +186,69 @@ def count_params(cfg: dict, model: FusionDetector) -> None:
     print("  [PASS] frozen ≫ trainable in Stage 1.")
 
 
-# ── 5. one real batch from the Phase 3 dataloader ────────────────────────────
+# ── 5. Phase 5 loss smoke check (one batch → finite loss, grads flow) ────────
+def check_loss(cfg: dict, model: FusionDetector, device: str,
+               split: str | None, batch_size: int) -> None:
+    print(f"\n=== check_loss (split={split or 'synthetic'}) ===")
+    from training.loss_adapter import build_loss, get_class_id_map, targets_to_batch
+
+    if split:
+        from datasets.dataloader import create_dataloaders
+        loaders = dict(zip(("train", "val", "test"),
+                           create_dataloaders(cfg, batch_size=batch_size,
+                                              num_workers=0)))
+        loader = loaders.get(split)
+        assert loader is not None, f"no annotations for split '{split}'"
+        visible, thermal, targets = next(iter(loader))
+        trc = FusionDetector.trc_from_targets(targets, device=device)
+        visible, thermal = visible.to(device), thermal.to(device)
+    else:
+        # Synthetic batch: random images + a couple of plausible person boxes.
+        visible, thermal, trc = _dummy_batch(cfg, batch_size, device)
+        h, w = visible.shape[-2:]
+        g = torch.Generator().manual_seed(int(cfg["datasets"].get("seed", 42)))
+        targets = []
+        for _ in range(visible.shape[0]):
+            xy = torch.rand(3, 2, generator=g) * torch.tensor([w * 0.7, h * 0.7])
+            wh = 20 + torch.rand(3, 2, generator=g) * torch.tensor([w * 0.2, h * 0.2])
+            targets.append({"boxes": torch.cat([xy, wh], dim=1),
+                            "labels": torch.ones(3, dtype=torch.int64)})
+
+    model.freeze_pretrained()      # Stage 1
+    model.train()
+    loss_fn = build_loss(model, cfg)
+    batch = targets_to_batch(targets, visible.shape[-2:], get_class_id_map(cfg))
+    print(f"  batch: {visible.shape[0]} image(s), {batch['bboxes'].shape[0]} box(es)")
+
+    model.zero_grad(set_to_none=True)
+    preds = model(visible, thermal, trc)
+    loss, items = loss_fn(preds, batch)
+    total = loss.sum()
+    assert torch.isfinite(total), f"non-finite loss: {items}"
+    print(f"  [OK] loss finite: box={items[0]:.4f} cls={items[1]:.4f} "
+          f"dfl={items[2]:.4f} (total {total.item():.4f})")
+
+    total.backward()
+    for name, (mod, expect_grad) in {
+        "visible_backbone (frozen)": (model.backbone.visible, False),
+        "neck (frozen)":             (model.neck, False),
+        "head (frozen)":             (model.head, False),
+        "thermal_backbone (train)":  (model.backbone.thermal, True),
+        "fusion (train)":            (model.fusion_neck, True),
+    }.items():
+        if not expect_grad:
+            assert all(p.grad is None for p in mod.parameters()), \
+                f"{name}: frozen params received gradients through the loss!"
+        else:
+            assert any(p.grad is not None and p.grad.abs().sum() > 0
+                       for p in mod.parameters()), \
+                f"{name}: expected gradients but none arrived!"
+        print(f"  [OK] {name:<28s} grad contract holds")
+    model.zero_grad(set_to_none=True)
+    print("  [PASS] v8DetectionLoss wiring: finite loss, freeze contract intact.")
+
+
+# ── 6. one real batch from the Phase 3 dataloader ────────────────────────────
 def check_dataloader(cfg: dict, model: FusionDetector, device: str,
                      split: str, batch_size: int) -> None:
     print(f"\n=== check_dataloader (split={split}) ===")
@@ -210,7 +278,8 @@ def check_dataloader(cfg: dict, model: FusionDetector, device: str,
 def main() -> int:
     ap = argparse.ArgumentParser(description="Phase 4 fusion validation")
     ap.add_argument("--config", default=str(DEFAULT_CONFIG))
-    ap.add_argument("--test", choices=["shapes", "trc_effect", "grad_flow", "params", "all"],
+    ap.add_argument("--test",
+                    choices=["shapes", "trc_effect", "grad_flow", "params", "loss", "all"],
                     default="all")
     ap.add_argument("--split", default=None,
                     help="Also run one real batch from this split (val/test/train).")
@@ -234,10 +303,14 @@ def main() -> int:
         check_grad_flow(cfg, model, args.device)
     if args.test in ("params", "all"):
         count_params(cfg, model)
-    if args.split:
+    if args.test == "loss":
+        # Phase 5 (§10.2) — loss/grad smoke check; uses a real batch when
+        # --split is given, else a synthetic one. Not part of "all".
+        check_loss(cfg, model, args.device, args.split, args.batch_size)
+    elif args.split:
         check_dataloader(cfg, model, args.device, args.split, args.batch_size)
 
-    print("\nAll requested Phase 4 checks passed. ✅")
+    print("\nAll requested checks passed. ✅")
     return 0
 
 

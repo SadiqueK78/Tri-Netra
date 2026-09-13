@@ -1,6 +1,10 @@
 # Phase 5 — Detection Integration & Training (TRC Ablation)
 
-> Status: 🔲 **Planned** (not yet implemented)
+> Status: ✅ **Implemented** — code complete and smoke-verified end to end
+> (loss adapter self-test, one-batch loss + freeze contract on a real val batch,
+> an overfit training run, and all four ablation variants built, stepped,
+> evaluated and tabulated). The long training runs themselves are the user's to
+> launch: see §10 and the measured findings in §14.
 > Prereq: ✅ Phase 2 (data) + ✅ Phase 3 (preprocessing & TRC) + ✅ Phase 4
 > (TRC-gated fusion detector) — see [`PHASE4_IMPLEMENTATION.md`](PHASE4_IMPLEMENTATION.md)
 > and [`PHASE4_EXPLAINED.md`](PHASE4_EXPLAINED.md).
@@ -453,3 +457,109 @@ ByteTrack as configured in the `tracking` block.
 - **What if clean-set gains are small?** Expected — LLVIP night frames have
   high TRC. The adaptive gate is insurance for degraded thermal; that's what
   the binned/stress columns measure.
+
+---
+
+## 14. Implementation Findings (measured while wiring Phase 5 up)
+
+Four things only showed up once the loss and the evaluator were actually run
+against real data. All four are fixed in the code; they are recorded here
+because each one changes a claim the plan above makes.
+
+### 14.1 Input normalization silently destroyed the pretrained prior 🔴
+
+`configs/default.yaml` normalized the visible stream with **ImageNet** stats
+(`mean 0.485/0.456/0.406`, `std 0.229/0.224/0.225`). Ultralytics YOLOv8 is
+trained on **plain 0–1 pixels**, so the frozen COCO backbone was being fed
+inputs roughly two standard deviations off distribution. Measured on one val
+batch with the stock `yolov8m.pt`:
+
+| Visible input | person detections (8 images) |
+|---------------|------------------------------|
+| ImageNet-standardized | `0 0 0 0 0 0 0 0` |
+| plain 0–1             | `4 3 0 3 5 5 4 1` |
+
+Untrained-fusion val mAP@0.5 over 64 images went **0.000 → 0.768** once the
+stats were changed to identity (`mean 0`, `std 1` — i.e. a plain `/255`). This
+is exactly the "strong sanity anchor" §10 predicts, and it was unreachable
+before. The thermal branch got the same treatment (`mean 0`, `std 1`) because
+`ThermalStem`'s `mean3ch` warm start inherits kernels that expect that range.
+
+**Consequence:** with the old stats, Stage 1 would have had to relearn
+detection from scratch through the fusion blocks alone — the frozen backbone
+can never adapt. `utils/visualize.py` reads the same config keys to
+de-normalize, so it stays correct automatically.
+
+### 14.2 `SingleModalDetector` trained nothing (RGB baseline) 🔴
+
+`YOLO(path).model` hands back a checkpoint whose parameters all have
+`requires_grad=False` — ultralytics re-enables them inside its own trainer,
+which we bypass. `FusionDetector` never hit this because `apply_stage(1)`
+unfreezes everything before freezing the pretrained parts. The RGB baseline,
+whose default freeze set is empty, reported **0 trainable parameters** and
+`backward()` raised `element 0 of tensors does not require grad`. Fixed by
+explicitly enabling grads before applying the freeze set.
+
+### 14.3 The thermal baseline crashed on the stock forward pass 🔴
+
+`DetectionModel.forward` walks layers by their `f`/`i` from-index attributes;
+the Phase-4 `DualBackbone` walks them by list index instead, so `ThermalStem`
+never needed them. Dropping the stem into `det.model[0]` for the thermal-only
+baseline raised `'ThermalStem' object has no attribute 'f'`. Fixed in
+`training/baselines.py` by copying `i`/`f`/`type`/`np` onto the replacement —
+Phase-4 code stays untouched.
+
+### 14.4 The `trc < 0.5` column is empty on clean LLVIP ⚠️
+
+Measured TRC over 400 clean test frames: **mean 0.744, min 0.726, max 0.766**
+— every frame lands in the "clean" bin. §5.2's degraded bin is not merely
+sparse on LLVIP, it is *empty*, so the clean-set degraded column can never
+carry the claim.
+
+The stress protocol does reach it. Through the full preprocessing pipeline:
+
+| Injected corruption | TRC (clean → stressed) |
+|---------------------|------------------------|
+| `blur`     | 0.744 → 0.676 (marginal bin) |
+| `saturate` | 0.745 → 0.398 (**degraded bin**) |
+
+With the 50/50 blur/saturate split, ~half the stress set falls below 0.5
+(measured: 31 of 64). **The degraded evidence for the thesis claim therefore
+lives entirely in the stress block**, and `runs/ablation/results.md` now prints
+the TRC-binned mAP for the stress set as well as the clean one, with a note
+saying why the clean column is blank rather than leaving an unexplained dash.
+
+### 14.5 Two Windows-specific correctness traps (fixed)
+
+* The stress hook was a **closure** assigned onto the dataset. `create_dataloaders`
+  uses `num_workers: 4`, and Windows spawns workers by pickling the dataset —
+  `Can't pickle local object`. It is now a module-level `StressThermalLoader`.
+* `create_dataloaders` also sets `persistent_workers=True`, so workers hold a
+  copy of the dataset made when iteration *first* started. Patching a loader
+  that has already been iterated is a silent no-op (observed: an identical TRC
+  distribution before and after "installing" the corruption).
+  `install_stress_corruption` now accepts the loader and clears its cached
+  iterator, and the ablation scores the stress set through a fresh loader.
+
+### 14.6 Verified, and not
+
+Verified by running:
+
+1. `python -m training.loss_adapter --self-test` — all five unit checks.
+2. `python utils/check_fusion.py --test loss --split val` — finite loss on a
+   real batch and the freeze contract intact *after* loss wiring, at
+   **17,019,411 trainable / 25,902,640 frozen** (matches Phase 4 exactly).
+3. `python training/train_fusion.py --overfit 16 --epochs 4` — the full `fit()`
+   loop end to end: startup checks, AMP step, cosine LR, per-epoch COCOeval,
+   `best.pt`/`last.pt` checkpointing.
+4. `python training/evaluate.py --checkpoint … --split val` — the whole 2122-image
+   val split through decode → NMS → COCOeval → TRC bins.
+5. All four ablation variants built, stepped, scored on clean + stress, and
+   rendered into the results table.
+
+`--test loss` also had to be wired into `check_fusion.py`'s CLI: the function
+existed but no `--test` choice reached it, so the §10.2 check could not run.
+
+Not run: the full Stage-1 schedule, Stage 2, and the real ablation. Those are
+GPU-hours, not code. Every number quoted above comes from *untrained* models
+and is a starting anchor, not a result.

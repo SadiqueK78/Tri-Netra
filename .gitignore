@@ -13,3 +13,12 @@ __pycache__/
 
 # Environment variables
 .env
+# Phase 5 training outputs: checkpoints and TensorBoard logs.
+# Note runs/visualizations/ is deliberately NOT ignored - the Phase 3/4
+# figures under it are committed deliverables.
+runs/fusion/
+runs/baselines/
+runs/ablation/
+weights/fusion/
+weights/baselines/
+weights/ablation/

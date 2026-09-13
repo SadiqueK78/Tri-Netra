@@ -84,9 +84,9 @@ Edit `configs/default.yaml` to point to your dataset and weight directories.
 |-------|------------------------------------------|--------------|
 | 1     | Project scaffold & environment setup     | ✅ Complete   |
 | 2     | Data acquisition & dataset preparation   | ✅ Complete   |
-| 3     | Preprocessing pipeline (TRC)             | 🔲 Planned   |
-| 4     | Cross-modal fusion module                | 🔲 Planned   |
-| 5     | Multi-scale object detection             | 🔲 Planned   |
+| 3     | Preprocessing pipeline (TRC)             | ✅ Complete   |
+| 4     | Cross-modal fusion module                | ✅ Complete   |
+| 5     | Detection integration & training         | ✅ Code complete (training runs pending) |
 | 6     | Tracking & behaviour analysis            | 🔲 Planned   |
 | 7     | Hierarchical threat reasoning            | 🔲 Planned   |
 | 8     | Explainable alert generation             | 🔲 Planned   |
