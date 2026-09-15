@@ -162,10 +162,11 @@ fusion:
 
 # ── Tracking ───────────────────────────────────────────────────────────────
 tracking:
-  algorithm: "deepsort"           # Options: deepsort, bytetrack
+  algorithm: "deepsort"           # Options: deepsort (bytetrack planned)
   max_age: 30
   min_hits: 3
   iou_threshold: 0.3
+  embedder: "mobilenet"          # appearance re-id model; null/none = motion+IoU only (no frame needed)
 
 # ── Risk Assessment ───────────────────────────────────────────────────────
 risk_model:

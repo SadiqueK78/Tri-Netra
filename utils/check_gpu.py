@@ -21,6 +21,14 @@ import sys
 import subprocess
 import shutil
 
+# Windows consoles/pipes default to cp1252 and choke on box-drawing/emoji
+# output; force UTF-8 so scripts never crash on a print().
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:  # pragma: no cover — older interpreters / redirected streams
+    pass
+
 
 def check_torch_cuda():
     """Check PyTorch's CUDA availability and print device details."""

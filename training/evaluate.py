@@ -30,6 +30,7 @@ import argparse
 import contextlib
 import io
 import sys
+import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -244,7 +245,10 @@ def evaluate(model, loader, cfg: dict, device: str = "cuda",
     trc_by_img: Dict[int, float] = {}
     img_hw = None
 
-    for visible, thermal, targets in loader:
+    n_batches = len(loader)
+    log_every = max(1, n_batches // 20)
+    t_start = time.time()
+    for i, (visible, thermal, targets) in enumerate(loader):
         trc = FusionDetector.trc_from_targets(targets, device=device)
         img_hw = tuple(visible.shape[-2:])
         out = model(visible.to(device), thermal.to(device), trc)
@@ -253,6 +257,15 @@ def evaluate(model, loader, cfg: dict, device: str = "cuda",
         results += detections_to_coco(dets, targets, img_hw, coco_from_head)
         for t in targets:
             trc_by_img[int(t["image_id"])] = float(t.get("trc", 1.0))
+
+        if (i + 1) % log_every == 0 or (i + 1) == n_batches:
+            n_img = len(trc_by_img)
+            elapsed = time.time() - t_start
+            rate = (i + 1) / elapsed if elapsed > 0 else 0.0
+            eta = (n_batches - i - 1) / rate if rate > 0 else float("nan")
+            print(f"  eval batch {i + 1}/{n_batches}  ({n_img} images, "
+                  f"{len(results)} dets so far)  elapsed={elapsed:.0f}s  "
+                  f"eta={eta:.0f}s", flush=True)
 
     coco_gt = loader.dataset.coco
     all_ids = list(trc_by_img)

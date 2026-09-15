@@ -190,7 +190,7 @@ def count_params(cfg: dict, model: FusionDetector) -> None:
 def check_loss(cfg: dict, model: FusionDetector, device: str,
                split: str | None, batch_size: int) -> None:
     print(f"\n=== check_loss (split={split or 'synthetic'}) ===")
-    from training.loss_adapter import build_loss, get_class_id_map, targets_to_batch
+    from training.loss_adapter import build_loss, get_class_id_map, targets_to_batch, unpack_loss_items
 
     if split:
         from datasets.dataloader import create_dataloaders
@@ -225,8 +225,9 @@ def check_loss(cfg: dict, model: FusionDetector, device: str,
     loss, items = loss_fn(preds, batch)
     total = loss.sum()
     assert torch.isfinite(total), f"non-finite loss: {items}"
-    print(f"  [OK] loss finite: box={items[0]:.4f} cls={items[1]:.4f} "
-          f"dfl={items[2]:.4f} (total {total.item():.4f})")
+    box, cls, dfl = unpack_loss_items(items)
+    print(f"  [OK] loss finite: box={box:.4f} cls={cls:.4f} "
+          f"dfl={dfl:.4f} (total {total.item():.4f})")
 
     total.backward()
     for name, (mod, expect_grad) in {

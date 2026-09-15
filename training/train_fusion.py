@@ -62,6 +62,7 @@ from training.loss_adapter import (                             # noqa: E402
     build_loss,
     get_class_id_map,
     targets_to_batch,
+    unpack_loss_items,
 )
 
 
@@ -108,8 +109,9 @@ def startup_checks(model, loss_fn, loader, cfg: dict, device: str) -> None:
     loss, items = loss_fn(preds, batch)
     total = loss.sum()
     assert torch.isfinite(total), f"non-finite loss at startup: {items}"
-    print(f"  [OK] one-batch loss finite: box={items[0]:.4f} "
-          f"cls={items[1]:.4f} dfl={items[2]:.4f}")
+    box, cls, dfl = unpack_loss_items(items)
+    print(f"  [OK] one-batch loss finite: box={box:.4f} "
+          f"cls={cls:.4f} dfl={dfl:.4f}")
 
     total.backward()
     frozen_hit = [n for n, p in model.named_parameters()
@@ -238,14 +240,16 @@ def fit(
             scaler.update()
             opt.zero_grad(set_to_none=True)
 
-            running += items.cpu()
+            item_vals = torch.tensor(unpack_loss_items(items))
+            running += item_vals
             step += 1
             if writer and step % log_every == 0:
-                for k, v in zip(("box", "cls", "dfl"), items.tolist()):
+                for k, v in zip(("box", "cls", "dfl"), item_vals.tolist()):
                     writer.add_scalar(f"train/loss_{k}", v, step)
             if it % max(1, len(train_loader) // 5) == 0:
+                box, cls, dfl = item_vals.tolist()
                 print(f"  e{epoch:03d} it{it:04d}/{len(train_loader)}  "
-                      f"box={items[0]:.4f} cls={items[1]:.4f} dfl={items[2]:.4f}")
+                      f"box={box:.4f} cls={cls:.4f} dfl={dfl:.4f}")
 
         sched.step()
         mean = (running / max(1, len(train_loader))).tolist()
@@ -269,7 +273,7 @@ def fit(
             if neck is not None:
                 for name in ("fuse3", "fuse4", "fuse5"):
                     writer.add_scalar(f"fusion/alpha_{name}",
-                                      float(getattr(neck, name).alpha), epoch)
+                                      getattr(neck, name).alpha.detach().item(), epoch)
 
         save_checkpoint(last_path, model, opt, epoch, stage, best_map, cfg, variant)
         if map50 > best_map:
@@ -320,9 +324,39 @@ def build_overfit_loaders(cfg: dict, n_images: int, batch_size: int):
     return mk(True), mk(False)
 
 
+# ── subset loaders (small real train/val slices, e.g. for a CPU proof-of-concept) ──
+def build_subset_loaders(cfg: dict, n_train: int, n_val: int, batch_size: int):
+    """(train, val) loaders over disjoint real data: ``n_train`` train-split
+    images with normal train augmentation, ``n_val`` *held-out* val-split
+    images with the deterministic val transform. Unlike ``build_overfit_loaders``
+    this measures genuine generalization, just over a smaller slice than a
+    full run — useful for a CPU-feasible sanity check that the fusion is
+    actually learning, not just memorizing.
+    """
+    from datasets.dataloader import _make_split_dataset, dual_modal_collate_fn
+    from torch.utils.data import DataLoader
+
+    train_ds = _make_split_dataset(cfg, "train")
+    val_ds = _make_split_dataset(cfg, "val")
+    assert train_ds is not None and val_ds is not None, (
+        "train/val annotations unavailable — run the Phase-2 dataset scripts first.")
+    train_ds.image_ids = train_ds.image_ids[:n_train]
+    val_ds.image_ids = val_ds.image_ids[:n_val]
+    print(f"  [OK] subset: {len(train_ds)} train / {len(val_ds)} held-out val images.")
+
+    train_loader = DataLoader(train_ds, batch_size=min(batch_size, n_train),
+                              shuffle=True, num_workers=0, drop_last=True,
+                              collate_fn=dual_modal_collate_fn)
+    val_loader = DataLoader(val_ds, batch_size=min(batch_size, n_val),
+                            shuffle=False, num_workers=0,
+                            collate_fn=dual_modal_collate_fn)
+    return train_loader, val_loader
+
+
 # ── stage orchestration (§4.2) ───────────────────────────────────────────────
 def train(cfg: dict, stage: int = 1, epochs: Optional[int] = None,
           resume: Optional[str] = None, overfit: Optional[int] = None,
+          subset: Optional[int] = None, val_subset: Optional[int] = None,
           batch_size: Optional[int] = None, device: str = "cuda") -> dict:
     """Run one training stage of the fusion detector (or the overfit sanity)."""
     tcfg = cfg.get("training", {})
@@ -355,10 +389,15 @@ def train(cfg: dict, stage: int = 1, epochs: Optional[int] = None,
                    tb_dir=tb_dir, variant="fusion", stage=stage,
                    early_stop_patience=0)      # never stop early when memorizing
 
-    from datasets.dataloader import create_dataloaders
-    train_loader, val_loader, _ = create_dataloaders(cfg, batch_size=batch_size)
-    assert train_loader is not None and val_loader is not None, (
-        "train/val dataloaders unavailable — run the Phase-2 dataset scripts first.")
+    bs = batch_size or int(tcfg.get("batch_size", 16))
+    if subset:
+        train_loader, val_loader = build_subset_loaders(
+            cfg, subset, val_subset or max(20, subset // 4), bs)
+    else:
+        from datasets.dataloader import create_dataloaders
+        train_loader, val_loader, _ = create_dataloaders(cfg, batch_size=bs)
+        assert train_loader is not None and val_loader is not None, (
+            "train/val dataloaders unavailable — run the Phase-2 dataset scripts first.")
 
     if stage == 1:
         lr = float(tcfg.get("learning_rate", 1e-3))
@@ -371,7 +410,8 @@ def train(cfg: dict, stage: int = 1, epochs: Optional[int] = None,
 
     return fit(model, cfg, train_loader, val_loader,
                epochs=n_epochs, lr=lr, device=device,
-               out_dir=out_dir, tb_dir=tb_dir, variant="fusion",
+               out_dir=(out_dir / "poc" if subset else out_dir),
+               tb_dir=tb_dir, variant="fusion",
                stage=stage, warmup_epochs=warmup, resume=resume)
 
 
@@ -386,14 +426,20 @@ def main() -> int:
                     help="Checkpoint to resume (stage 1) or init from (stage 2).")
     ap.add_argument("--overfit", type=int, default=None, metavar="N",
                     help="Sanity mode: memorize N train images (default 50 epochs).")
+    ap.add_argument("--subset", type=int, default=None, metavar="N",
+                    help="Proof-of-concept mode: train on N real train images, "
+                         "evaluate on real held-out val images (generalization, "
+                         "not memorization) — for a CPU-feasible sanity run.")
+    ap.add_argument("--val-subset", type=int, default=None, metavar="N",
+                    help="Val image count for --subset (default: max(20, N//4)).")
     ap.add_argument("--batch-size", type=int, default=None)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
     summary = train(cfg, stage=args.stage, epochs=args.epochs, resume=args.resume,
-                    overfit=args.overfit, batch_size=args.batch_size,
-                    device=args.device)
+                    overfit=args.overfit, subset=args.subset, val_subset=args.val_subset,
+                    batch_size=args.batch_size, device=args.device)
     print(f"\n[DONE] variant={summary['variant']} stage={summary['stage']} "
           f"best mAP50={summary['best_map50']:.4f} → {summary['best_path']}")
     return 0

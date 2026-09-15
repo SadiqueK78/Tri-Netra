@@ -3,10 +3,12 @@ TriNetra-AMRF — Object Tracking Models
 =========================================
 
 Multi-object tracking algorithms for persistent identity association.
-Planned implementations:
-  - DeepSORT (deep appearance + Kalman filter)
-  - ByteTrack (byte-level association for low-confidence detections)
-  - Custom re-identification (ReID) feature extractor
 
-# TODO: implement tracking modules in Phase 6–7
+  - DeepSORT (deep appearance + Kalman filter)  -> deepsort_tracker.FusionTracker  [done, Phase 6.1]
+  - ByteTrack (byte-level association for low-confidence detections)  [planned]
+  - Custom re-identification (ReID) feature extractor  [planned]
+
+Self-test: python -m utils.check_tracker
 """
+
+from .deepsort_tracker import FusionTracker  # noqa: F401

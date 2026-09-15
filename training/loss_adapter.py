@@ -60,6 +60,26 @@ def get_class_id_map(cfg: dict) -> Dict[int, int]:
     return {int(k): int(v) for k, v in m.items()}
 
 
+# ── loss-items compatibility shim ────────────────────────────────────────────
+def unpack_loss_items(items) -> Tuple[float, float, float]:
+    """Return ``(box, cls, dfl)`` floats from a ``v8DetectionLoss`` call.
+
+    Ultralytics 8.4.89 (this project's original pin) returns ``loss_items`` as
+    a plain ``[box, cls, dfl]`` tensor; 8.4.150+ returns
+    ``dict(zip(self.loss_names, ...))`` with keys ``box_loss``/``cls_loss``/
+    ``dfl_loss`` instead. Handle both so callers don't care which is running.
+    """
+    if isinstance(items, dict):
+        def _get(*keys):
+            for k in keys:
+                if k in items:
+                    return float(items[k])
+            raise KeyError(f"none of {keys} found in loss items dict {list(items)}")
+
+        return _get("box_loss", "box"), _get("cls_loss", "cls"), _get("dfl_loss", "dfl", "l1_loss")
+    return float(items[0]), float(items[1]), float(items[2])
+
+
 # ── target adapter ───────────────────────────────────────────────────────────
 def targets_to_batch(
     targets: List[dict],

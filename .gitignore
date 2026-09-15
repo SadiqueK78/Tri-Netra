@@ -22,3 +22,7 @@ runs/ablation/
 weights/fusion/
 weights/baselines/
 weights/ablation/
+
+# Copyrighted third-party reference papers (IEEE/Elsevier/ACM/MDPI) - do not
+# redistribute. TriNetra's own paper draft lives in "TRI-Netra Research Paper/".
+IMP Research Paper/
