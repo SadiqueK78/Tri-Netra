@@ -93,10 +93,16 @@ def trainable_params(model: torch.nn.Module):
 
 
 # ── startup self-checks (§4.3) ───────────────────────────────────────────────
-def startup_checks(model, loss_fn, loader, cfg: dict, device: str) -> None:
+def startup_checks(model, loss_fn, loader, cfg: dict, device: str,
+                    amp: bool = False) -> None:
     """Re-assert the freeze contract *after* loss/optimizer wiring, and that
     one real batch produces a finite loss with grads reaching only trainable
     params (the Phase-4 ``check_grad_flow`` contract, generalized to any stage).
+
+    Runs its forward/backward under the same ``amp`` setting as the real
+    training loop — previously this always ran in full FP32 regardless of
+    ``training.mixed_precision``, which on a memory-constrained GPU can OOM
+    here even when the real loop (correctly using AMP) would have fit.
     """
     print("\n=== startup self-checks ===")
     class_map = get_class_id_map(cfg)
@@ -106,8 +112,9 @@ def startup_checks(model, loss_fn, loader, cfg: dict, device: str) -> None:
 
     model.train()
     model.zero_grad(set_to_none=True)
-    preds = model(visible.to(device), thermal.to(device), trc)
-    loss, items = loss_fn(preds, batch)
+    with torch.amp.autocast("cuda", enabled=amp):
+        preds = model(visible.to(device), thermal.to(device), trc)
+        loss, items = loss_fn(preds, batch)
     total = loss.sum()
     assert torch.isfinite(total), f"non-finite loss at startup: {items}"
     box, cls, dfl = unpack_loss_items(items)
@@ -122,6 +129,8 @@ def startup_checks(model, loss_fn, loader, cfg: dict, device: str) -> None:
               for p in trainable_params(model))
     assert got, "no gradients reached any trainable parameter!"
     model.zero_grad(set_to_none=True)
+    if device.startswith("cuda"):
+        torch.cuda.empty_cache()
     t, f = param_counts(model)
     print(f"  [OK] freeze contract holds: {t:,} trainable / {f:,} frozen")
     print("  [PASS] startup self-checks passed.")
@@ -238,7 +247,7 @@ def fit(
                 if early_stop_patience is None else early_stop_patience)
 
     loss_fn = build_loss(model, cfg)
-    startup_checks(model, loss_fn, train_loader, cfg, device)
+    startup_checks(model, loss_fn, train_loader, cfg, device, amp=amp)
 
     wd = float(tcfg.get("weight_decay", 5e-4))
     opt_name = str(tcfg.get("optimizer", "adamw")).lower()

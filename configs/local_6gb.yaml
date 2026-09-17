@@ -1,0 +1,236 @@
+# ============================================================================
+# TriNetra-AMRF — Default Configuration
+# ============================================================================
+# This file defines default paths, hyperparameters, and runtime settings.
+# Override per-experiment by creating a copy or using CLI args.
+# ============================================================================
+
+# ── Project Metadata ────────────────────────────────────────────────────────
+project:
+  name: "TriNetra-AMRF"
+  version: "0.1.0"
+  description: "Dual-Modality Surveillance Framework"
+
+# ── Dataset Paths ───────────────────────────────────────────────────────────
+datasets:
+  # Canonical (processed) directories — produced by datasets/split_dataset.py
+  visible_dir: "datasets/visible/"
+  thermal_dir: "datasets/thermal/"
+  annotations_dir: "datasets/annotations/"
+  calibration_dir: "datasets/calibration/"
+
+  # Active dataset source (llvip, kaist, m3fd, flir_adas)
+  active_source: "m3fd"
+
+  # Per-source raw locations & metadata. Each script reads the block that
+  # matches `active_source`.
+  sources:
+    llvip:
+      root: "datasets/LLVIP/"
+      visible_subdir: "visible"        # datasets/LLVIP/visible/{train,test}
+      thermal_subdir: "infrared"       # datasets/LLVIP/infrared/{train,test}
+      annotations_subdir: "Annotations"  # flat VOC XML (both splits)
+      annotation_format: "voc"         # voc | kaist | coco
+      # LLVIP ships an official train/test split; these are the folder names.
+      official_train_dir: "train"
+      official_test_dir: "test"
+      # LLVIP only labels pedestrians -> map to unified `person` (id 1).
+      class_map:
+        person: 1
+    m3fd:
+      root: "datasets/M3FD/"
+      visible_subdir: "Vis"             # datasets/M3FD/Vis/*.png (flat, no split)
+      thermal_subdir: "Ir"              # datasets/M3FD/Ir/*.png
+      annotations_subdir: "Annotation"  # flat VOC XML, same schema as LLVIP
+      annotation_format: "voc"          # voc | kaist | coco
+      # M3FD ships no official train/test split (unlike LLVIP) -> the whole
+      # 4,200 pairs are pooled and split fresh by split_ratios below.
+      # M3FD's 6 raw classes -> unified ids. "Lamp" has no unified equivalent
+      # and is intentionally left unmapped (dropped at conversion time).
+      class_map:
+        people: 1
+        car: 2
+        bus: 3
+        truck: 4
+        motorcycle: 5
+
+  # Master COCO JSON produced by convert_annotations.py (pre-split).
+  master_annotations: "datasets/annotations/instances_all.json"
+
+  # Unified category mapping (shared across all sources).
+  categories:
+    - {id: 1, name: "person",     supercategory: "human"}
+    - {id: 2, name: "car",        supercategory: "vehicle"}
+    - {id: 3, name: "bus",        supercategory: "vehicle"}
+    - {id: 4, name: "truck",      supercategory: "vehicle"}
+    - {id: 5, name: "motorcycle", supercategory: "vehicle"}
+    - {id: 6, name: "cyclist",    supercategory: "human"}
+
+  # Image properties. M3FD native resolution is 1024x768; the model input
+  # size below is what the DataLoader resizes to (width, height). Table 4
+  # specifies a square 640x640 input — since M3FD's native aspect (4:3)
+  # isn't square, the plain-resize pipeline (datasets/augmentations.py has
+  # no letterbox/pad step) will stretch images slightly to fit.
+  native_size: [1024, 768]
+  image_size: [640, 640]
+
+  # Augmentation settings (consumed by datasets/augmentations.py).
+  augmentation:
+    horizontal_flip_prob: 0.5
+    rotation_limit: 15
+    random_resized_crop: true
+    crop_scale: [0.6, 1.0]
+    color_jitter: true
+    thermal_gauss_noise: true
+    mosaic: false                      # Enable in later phases
+
+  # Phase 5: the detector is a COCO-pretrained ultralytics YOLOv8 whose frozen
+  # backbone was trained on plain 0..1 pixels — NOT ImageNet-standardized ones.
+  # Feeding it ImageNet stats shifts the input ~2 sigma off distribution and the
+  # frozen backbone produces zero usable detections (measured: 0 person dets on
+  # a val batch vs. 3-5 with 0..1 input). Identity stats == a plain /255 scale.
+  # The thermal branch matches, because ThermalStem is warm-started by averaging
+  # the pretrained 3-channel stem, which expects the same 0..1 range.
+  normalize:
+    visible_mean: [0.0, 0.0, 0.0]
+    visible_std:  [1.0, 1.0, 1.0]
+    thermal_mean: [0.0]
+    thermal_std:  [1.0]
+
+  # Reproducibility.
+  seed: 42
+
+  # train/val/test split ratios. For LLVIP the official test split is
+  # preserved as-is; `val` is carved out of the official train split using
+  # the train:val proportion below (0.7 : 0.15 -> val = 15/85 of train).
+  split_ratios:
+    train: 0.7
+    val: 0.15
+    test: 0.15
+  # When a source has an official test split, keep it and only split train/val.
+  # M3FD ships no official split (unlike LLVIP) -> pool everything and split fresh.
+  respect_official_test: false
+
+# ── Model Weights ──────────────────────────────────────────────────────────
+weights:
+  save_dir: "weights/"
+  detector_checkpoint: null       # Path to detector .pt file
+  fusion_checkpoint: null         # set to "weights/fusion/best.pt" once trained
+  tracker_checkpoint: null        # Path to tracker .pt file
+  risk_model_checkpoint: null     # Path to risk model .pt file
+
+# ── Preprocessing (Phase 3 — Layer 2: Preprocessing & Reliability) ───────────
+preprocessing:
+  alignment:
+    method: "homography"          # Options: homography, affine, rigid
+    reference_modality: "visible" # Which modality is the spatial reference
+    identity_ok: true             # LLVIP pre-aligned -> skip warp (pass-through)
+  denoise:
+    method: "bilateral"           # Options: bilateral, nlm, gaussian, guided
+    strength: 10                  # bilateral sigmaColor/sigmaSpace; nlm h
+    bilateral_d: 5                # neighborhood diameter (mild by default)
+    apply_to: ["visible", "thermal"]
+  normalize:
+    method: "clahe"               # Options: clahe, minmax, zscore, percentile_clip
+    clip_limit: 2.0
+    tile_grid_size: [8, 8]
+    thermal_percentile_clip: [1, 99]  # suppress hot/cold outliers before rescale
+
+  # Thermal Reliability Confidence — the novel Layer-2 output that drives
+  # adaptive fusion in Phase 4 (fusion multiplies the thermal branch by trc).
+  trc:
+    enabled: true
+    components:                   # per-cue weights (renormalized over enabled)
+      contrast:      0.2          # histogram entropy (flat/saturated -> low)
+      gradient:      0.2          # Laplacian variance (blur/defocus -> low)
+      saturation:    0.2          # clipped-pixel fraction (sensor clip -> low)
+      mutual_info:   0.2          # RGB<->IR MI (thermal crossover -> low)
+      align_error:   0.2          # reprojection error (misalignment -> low)
+    spatial_map: false            # true -> per-region trc_map for Phase 4
+    grid: 8                       # trc_map tiling (grid x grid) when spatial_map
+    mode: "online"                # online | offline_cache
+
+# ── Detection ──────────────────────────────────────────────────────────────
+detection:
+  model: "yolov8m"                # Ultralytics model variant
+  input_size: [640, 640]          # match datasets.image_size (W, H)
+  confidence_threshold: 0.25
+  iou_threshold: 0.45
+  num_classes: 6                  # Unified ids (the head stays 80-class COCO)
+  # Phase 5 Option A: keep the frozen 80-class COCO head; map unified category
+  # ids to COCO class indices (person=1 -> COCO 0). Eval filters to these.
+  class_id_map: {1: 0}
+
+# ── Fusion (Phase 4 — Layer 3: Adaptive Cross-Modal Fusion) ────────────────
+fusion:
+  strategy: "gated"               # gated | concatenation | attention
+  scales: ["P3", "P4", "P5"]      # backbone taps to fuse (strides 8/16/32)
+  trc_gate:
+    enabled: true                 # multiply thermal branch by trc
+    learnable_alpha: true         # wrap gate in a learnable scalar (init 1.0)
+    spatial: false                # true -> use Phase 3 trc_map per region
+    residual_visible: true        # fused = P_vis + block(trc*P_thr) (safe default)
+  backbone:
+    base_model: "weights/yolov8m.pt"  # pretrained COCO weights to load
+    thermal_warm_start: true      # seed thermal backbone from visible weights
+    thermal_stem_init: "mean3ch"  # mean3ch | random
+  train_schedule:
+    stage1_freeze: ["visible_backbone", "neck", "head"]
+    stage1_epochs: 150             # Table 4: 150 epochs
+    stage2_unfreeze: ["neck", "head"]   # [] to skip stage 2
+    stage2_lr: 1.0e-4
+
+# ── Tracking ───────────────────────────────────────────────────────────────
+tracking:
+  algorithm: "deepsort"           # Options: deepsort (bytetrack planned)
+  max_age: 30
+  min_hits: 3
+  iou_threshold: 0.3
+  embedder: "mobilenet"          # appearance re-id model; null/none = motion+IoU only (no frame needed)
+
+# ── Risk Assessment ───────────────────────────────────────────────────────
+risk_model:
+  num_threat_levels: 5            # 1 (benign) → 5 (critical)
+  temporal_window: 30             # Frames of history for behaviour analysis
+
+# ── Training ───────────────────────────────────────────────────────────────
+# LOCAL VARIANT of configs/default.yaml (which targets Colab's 16GB T4) — for
+# running on this machine's 6GB RTX 3060 laptop GPU. Everything matches
+# Table 4 (reference "Experimental Setting") EXCEPT mixed_precision, which
+# is kept ON here: 640x640 + batch 16 + AMP-off (fp32) does not reliably fit
+# in 6GB (AMP roughly halves activation memory), where it does comfortably
+# in Colab's 16GB. This is a disclosed, hardware-necessitated deviation, not
+# a silent one — report it as such alongside the mosaic-not-implemented note
+# if these numbers go in the paper. Mosaic itself is still not implemented
+# (see configs/default.yaml's comment) — HSV-equivalent jitter (color_jitter,
+# below) and horizontal flip are enabled instead.
+training:
+  batch_size: 16
+  num_workers: 8
+  epochs: 150
+  learning_rate: 0.01
+  optimizer: "sgd"
+  momentum: 0.937
+  lrf: 0.01                       # cosine floor = learning_rate * lrf (ultralytics convention)
+  weight_decay: 0.0005
+  grad_clip_norm: 10.0
+  loss_gains: {box: 7.5, cls: 0.5, dfl: 1.5}   # ultralytics v8DetectionLoss defaults
+  warmup_epochs: 3                # linear LR warmup (Stage 2)
+  scheduler: "cosine"
+  early_stopping_patience: 15
+  mixed_precision: true            # LOCAL DEVIATION from Table 4 (AMP off) — see note above
+  log_dir: "runs/"
+  checkpoint_dir: "weights/fusion/"
+
+# ── Inference ──────────────────────────────────────────────────────────────
+inference:
+  device: "cuda:0"                # GPU device; falls back to CPU if unavailable
+  batch_size: 1
+  use_onnx: false
+  use_tensorrt: false
+
+# ── API Server ─────────────────────────────────────────────────────────────
+server:
+  host: "0.0.0.0"
+  port: 8000
+  reload: true
