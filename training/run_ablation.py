@@ -28,6 +28,10 @@ Usage:
     python training/run_ablation.py --variants fusion_trc fusion_no_trc
     python training/run_ablation.py --skip-train         # score existing best.pt
     python training/run_ablation.py --epochs 2           # quick smoke pass
+    python training/run_ablation.py --subset 1000 --epochs 5   # fast comparative
+                                                                 # pass on a real
+                                                                 # data slice, full
+                                                                 # test-set scoring
 """
 
 from __future__ import annotations
@@ -60,7 +64,7 @@ from training.evaluate import (                                  # noqa: E402
     install_stress_corruption,
     load_checkpoint_model,
 )
-from training.train_fusion import fit, resolve                   # noqa: E402
+from training.train_fusion import build_subset_loaders, fit, resolve  # noqa: E402
 
 VARIANTS = ("rgb", "thermal", "fusion_no_trc", "fusion_trc")
 ABLATION_DIR = "weights/ablation"
@@ -121,8 +125,19 @@ def run_variant(name: str, cfg: dict, args) -> Dict[str, object]:
     device = args.device
 
     row: Dict[str, object] = {"variant": name}
-    train_loader, val_loader, test_loader = create_dataloaders(
-        vcfg, batch_size=args.batch_size)
+    bs = args.batch_size or int(vcfg["training"].get("batch_size", 16))
+    if args.subset:
+        train_loader, val_loader = build_subset_loaders(
+            vcfg, args.subset, args.val_subset or max(20, args.subset // 4), bs)
+        out_dir = resolve(ABLATION_DIR) / "poc" / name
+        best_pt = out_dir / "best.pt"
+        # Test/stress scoring still uses the real, full test split — only
+        # training is shrunk. A small slice would make the comparison noise,
+        # not signal.
+        _, _, test_loader = create_dataloaders(vcfg, batch_size=bs)
+    else:
+        train_loader, val_loader, test_loader = create_dataloaders(
+            vcfg, batch_size=args.batch_size)
     assert test_loader is not None, "test dataloader unavailable."
 
     if args.skip_train and best_pt.is_file():
@@ -260,6 +275,14 @@ def main() -> int:
                     choices=list(VARIANTS), help="Subset of variants to run.")
     ap.add_argument("--epochs", type=int, default=None,
                     help="Override the per-variant epoch budget (default: stage1_epochs).")
+    ap.add_argument("--subset", type=int, default=None, metavar="N",
+                    help="Train each variant on N real train-split images "
+                         "(held-out val subset too) instead of the full set — "
+                         "for a fast comparative accuracy pass across variants "
+                         "before committing to the full run. Test/stress scoring "
+                         "still uses the full test split.")
+    ap.add_argument("--val-subset", type=int, default=None, metavar="N",
+                    help="Val image count for --subset (default: max(20, N//4)).")
     ap.add_argument("--batch-size", type=int, default=None)
     ap.add_argument("--skip-train", action="store_true",
                     help="Skip training when a variant's best.pt already exists.")

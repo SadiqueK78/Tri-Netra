@@ -135,14 +135,15 @@ def _coco_map(coco_gt, results: List[dict], img_ids: List[int],
               verbose: bool = False) -> Dict[str, float]:
     """Score detection results with COCOeval on the given image ids.
 
-    Returns {'mAP50': float, 'mAP50_95': float, 'mAP_small/medium/large': ...};
-    all -1.0 (COCO's "no data" marker → reported as nan) when results/ids are empty.
+    Returns {'mAP50': float, 'mAP75': float, 'mAP50_95': float,
+    'mAP_small/medium/large': ...}; all -1.0 (COCO's "no data" marker →
+    reported as nan) when results/ids are empty.
     """
     from pycocotools.cocoeval import COCOeval
 
     if not results or not img_ids:
         return {k: float("nan") for k in
-                ("mAP50", "mAP50_95", "mAP_small", "mAP_medium", "mAP_large")}
+                ("mAP50", "mAP75", "mAP50_95", "mAP_small", "mAP_medium", "mAP_large")}
 
     # loadRes prints; keep output clean unless verbose.
     sink = contextlib.nullcontext() if verbose else contextlib.redirect_stdout(io.StringIO())
@@ -161,9 +162,56 @@ def _coco_map(coco_gt, results: List[dict], img_ids: List[int],
         return float("nan") if v < 0 else v
 
     return {
-        "mAP50_95": stat(0), "mAP50": stat(1),
+        "mAP50_95": stat(0), "mAP50": stat(1), "mAP75": stat(2),
         "mAP_small": stat(3), "mAP_medium": stat(4), "mAP_large": stat(5),
     }
+
+
+def _precision_recall_f1(coco_gt, results: List[dict], img_ids: List[int],
+                          cat_ids: List[int], verbose: bool = False) -> Dict[str, float]:
+    """Classification-style Precision/Recall/F1 at IoU=0.5.
+
+    Unlike COCO's AP (averaged over 10 IoU thresholds and all confidence
+    levels), this scores the exact detection set ``decode_predictions``
+    already produced — i.e. at the deployment ``confidence_threshold`` +
+    NMS ``iou_threshold`` from the config — against IoU=0.5 matching. A
+    prediction is a true positive iff it is matched to an unmatched,
+    non-ignored ground-truth box at IoU>=0.5; unmatched predictions are
+    false positives, unmatched ground truths are false negatives.
+    """
+    from pycocotools.cocoeval import COCOeval
+
+    if not results or not img_ids:
+        return {"precision": float("nan"), "recall": float("nan"), "f1": float("nan")}
+
+    sink = contextlib.nullcontext() if verbose else contextlib.redirect_stdout(io.StringIO())
+    with sink:
+        coco_dt = coco_gt.loadRes(results)
+        ev = COCOeval(coco_gt, coco_dt, iouType="bbox")
+        ev.params.imgIds = sorted(img_ids)
+        ev.params.catIds = list(cat_ids)
+        ev.params.areaRng = [ev.params.areaRng[0]]        # 'all' only
+        ev.params.areaRngLbl = [ev.params.areaRngLbl[0]]
+        ev.evaluate()
+
+    tp = fp = fn = 0
+    for e in ev.evalImgs:
+        if e is None:
+            continue
+        dt_match = e["dtMatches"][0] > 0                  # IoU=0.5 row
+        dt_ignore = e["dtIgnore"][0].astype(bool)
+        gt_match = e["gtMatches"][0] > 0
+        gt_ignore = e["gtIgnore"].astype(bool)
+        tp += int((dt_match & ~dt_ignore).sum())
+        fp += int((~dt_match & ~dt_ignore).sum())
+        fn += int((~gt_match & ~gt_ignore).sum())
+
+    precision = tp / (tp + fp) if (tp + fp) > 0 else float("nan")
+    recall = tp / (tp + fn) if (tp + fn) > 0 else float("nan")
+    f1 = (2 * precision * recall / (precision + recall)
+          if precision == precision and recall == recall and (precision + recall) > 0
+          else float("nan"))
+    return {"precision": precision, "recall": recall, "f1": f1}
 
 
 # ── stress-corruption hook (5.7) ─────────────────────────────────────────────
@@ -270,6 +318,7 @@ def evaluate(model, loader, cfg: dict, device: str = "cuda",
     coco_gt = loader.dataset.coco
     all_ids = list(trc_by_img)
     metrics = _coco_map(coco_gt, results, all_ids, verbose=verbose)
+    metrics.update(_precision_recall_f1(coco_gt, results, all_ids, class_map.keys(), verbose=verbose))
     metrics["n_images"] = len(all_ids)
     metrics["n_dets"] = len(results)
     metrics["trc_mean"] = float(np.mean(list(trc_by_img.values()))) if trc_by_img else float("nan")
@@ -305,15 +354,15 @@ def load_checkpoint_model(ckpt_path: str, cfg: dict, device: str):
     """Rebuild the detector recorded in a Phase-5 checkpoint and load weights.
 
     The checkpoint's ``variant`` key selects the architecture: 'fusion' /
-    'fusion_no_trc' → ``FusionDetector``; 'rgb' / 'thermal' → the Phase-5
-    single-modality baselines.
+    'fusion_no_trc' / 'fusion_trc' → ``FusionDetector``; 'rgb' / 'thermal' →
+    the Phase-5 single-modality baselines.
     """
     from models.detector.fusion_detector import FusionDetector
 
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     cfg = ckpt.get("cfg_snapshot", cfg)
     variant = ckpt.get("variant", "fusion")
-    if variant in ("fusion", "fusion_no_trc"):
+    if variant in ("fusion", "fusion_no_trc", "fusion_trc"):
         model = FusionDetector(cfg)
     else:
         from training.baselines import SingleModalDetector

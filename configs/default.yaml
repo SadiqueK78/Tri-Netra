@@ -20,7 +20,7 @@ datasets:
   calibration_dir: "datasets/calibration/"
 
   # Active dataset source (llvip, kaist, m3fd, flir_adas)
-  active_source: "llvip"
+  active_source: "m3fd"
 
   # Per-source raw locations & metadata. Each script reads the block that
   # matches `active_source`.
@@ -37,6 +37,22 @@ datasets:
       # LLVIP only labels pedestrians -> map to unified `person` (id 1).
       class_map:
         person: 1
+    m3fd:
+      root: "datasets/M3FD/"
+      visible_subdir: "Vis"             # datasets/M3FD/Vis/*.png (flat, no split)
+      thermal_subdir: "Ir"              # datasets/M3FD/Ir/*.png
+      annotations_subdir: "Annotation"  # flat VOC XML, same schema as LLVIP
+      annotation_format: "voc"          # voc | kaist | coco
+      # M3FD ships no official train/test split (unlike LLVIP) -> the whole
+      # 4,200 pairs are pooled and split fresh by split_ratios below.
+      # M3FD's 6 raw classes -> unified ids. "Lamp" has no unified equivalent
+      # and is intentionally left unmapped (dropped at conversion time).
+      class_map:
+        people: 1
+        car: 2
+        bus: 3
+        truck: 4
+        motorcycle: 5
 
   # Master COCO JSON produced by convert_annotations.py (pre-split).
   master_annotations: "datasets/annotations/instances_all.json"
@@ -50,9 +66,9 @@ datasets:
     - {id: 5, name: "motorcycle", supercategory: "vehicle"}
     - {id: 6, name: "cyclist",    supercategory: "human"}
 
-  # Image properties. LLVIP native resolution is 1280x1024; the model input
+  # Image properties. M3FD native resolution is 1024x768; the model input
   # size below is what the DataLoader resizes to (width, height).
-  native_size: [1280, 1024]
+  native_size: [1024, 768]
   image_size: [640, 512]
 
   # Augmentation settings (consumed by datasets/augmentations.py).
@@ -89,7 +105,8 @@ datasets:
     val: 0.15
     test: 0.15
   # When a source has an official test split, keep it and only split train/val.
-  respect_official_test: true
+  # M3FD ships no official split (unlike LLVIP) -> pool everything and split fresh.
+  respect_official_test: false
 
 # ── Model Weights ──────────────────────────────────────────────────────────
 weights:

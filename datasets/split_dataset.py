@@ -73,7 +73,10 @@ def build_raw_image_index(cfg: dict) -> Tuple[Dict[str, Path], Dict[str, Path]]:
     """
     Map each image stem -> its raw visible path and raw thermal path.
 
-    Scans the source's official train/ and test/ subfolders for both modalities.
+    Scans the source's official train/ and test/ subfolders when it has them
+    (LLVIP); otherwise scans the visible/thermal roots directly, since not
+    every source ships a pre-split layout (M3FD is flat: all 4,200 pairs
+    sit straight under Vis/ and Ir/, no train/test subfolders).
     Returns (visible_index, thermal_index).
     """
     src = cfg["datasets"]["sources"][cfg["datasets"]["active_source"]]
@@ -81,10 +84,16 @@ def build_raw_image_index(cfg: dict) -> Tuple[Dict[str, Path], Dict[str, Path]]:
     vis_root = root / src["visible_subdir"]
     thr_root = root / src["thermal_subdir"]
 
+    if "official_train_dir" in src and "official_test_dir" in src:
+        subdirs = (src["official_train_dir"], src["official_test_dir"])
+        bases = [(vis_root / sub, thr_root / sub) for sub in subdirs]
+    else:
+        bases = [(vis_root, thr_root)]
+
     vis_index: Dict[str, Path] = {}
     thr_index: Dict[str, Path] = {}
-    for sub in (src["official_train_dir"], src["official_test_dir"]):
-        for base, index in ((vis_root / sub, vis_index), (thr_root / sub, thr_index)):
+    for vis_base, thr_base in bases:
+        for base, index in ((vis_base, vis_index), (thr_base, thr_index)):
             if not base.is_dir():
                 continue
             for p in base.iterdir():

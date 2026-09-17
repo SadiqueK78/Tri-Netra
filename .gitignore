@@ -3,6 +3,7 @@ env/
 venv/
 # Dataset
 datasets/LLVIP/
+datasets/M3FD/
 datasets/thermal/
 datasets/visible/
 
@@ -19,6 +20,7 @@ __pycache__/
 runs/fusion/
 runs/baselines/
 runs/ablation/
+runs/predictions/
 weights/fusion/
 weights/baselines/
 weights/ablation/

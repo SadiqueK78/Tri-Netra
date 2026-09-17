@@ -11,9 +11,9 @@ Purpose (Phase 2.3 — Data Acquisition & Dataset Preparation):
 
 Supported source formats:
     - LLVIP  : Pascal VOC XML  (person only)               [implemented]
-    - M3FD   : Pascal VOC XML  (6 classes)                  [via --source m3fd]
+    - M3FD   : Pascal VOC XML  (6 classes, "Lamp" dropped)  [implemented]
     - KAIST  : Caltech-style TXT                            [stub]
-    - FLIR   : COCO JSON (already unified)                  [copy + validate]
+    - FLIR   : COCO JSON (already unified)                  [not implemented]
 
 Key design choices:
     * The master JSON is produced BEFORE the train/val/test split. Each image
@@ -76,9 +76,22 @@ def build_category_index(cfg: dict) -> Dict[str, int]:
 
 
 # ── VOC → COCO ───────────────────────────────────────────────────────────────
-def _parse_voc_xml(xml_path: Path) -> Optional[dict]:
+def _parse_voc_xml(xml_path: Path, trust_filename: bool = True,
+                    fallback_ext: str = ".jpg") -> Optional[dict]:
     """
     Parse a single Pascal VOC XML file.
+
+    Args:
+        trust_filename: When True (LLVIP), use the XML's own ``<filename>``
+            tag. When False (M3FD), ignore it and always use the XML file's
+            own stem + ``fallback_ext`` — M3FD's ``<filename>`` tags are
+            unreliable (measured: 2,284/4,200 don't match their own file's
+            stem, 399 distinct values are claimed by more than one XML), so
+            the only trustworthy correspondence is same-named XML/image
+            pairs on disk.
+        fallback_ext: Extension to pair with the XML's own stem, either as
+            the true fallback (``<filename>`` missing) or, when
+            ``trust_filename=False``, unconditionally.
 
     Returns a dict with keys ``filename``, ``width``, ``height`` and a list of
     ``objects`` (each ``{name, xmin, ymin, xmax, ymax}``), or ``None`` if the
@@ -92,10 +105,9 @@ def _parse_voc_xml(xml_path: Path) -> Optional[dict]:
 
     root = tree.getroot()
 
-    filename = root.findtext("filename")
+    filename = root.findtext("filename") if trust_filename else None
     if not filename:
-        # Fall back to the XML's own stem + .jpg if <filename> is missing.
-        filename = xml_path.stem + ".jpg"
+        filename = xml_path.stem + fallback_ext
 
     size = root.find("size")
     width = int(float(size.findtext("width"))) if size is not None else 0
@@ -140,6 +152,8 @@ def convert_voc_to_coco(
     split_of: Optional[Dict[str, str]] = None,
     default_size: Optional[tuple] = None,
     class_alias: Optional[Dict[str, str]] = None,
+    trust_filename: bool = True,
+    image_ext: str = ".jpg",
 ) -> dict:
     """
     Convert a directory of Pascal VOC XML files to a COCO dict.
@@ -152,6 +166,12 @@ def convert_voc_to_coco(
         default_size:   (width, height) fallback if an XML omits <size>.
         class_alias:    Optional {source_class_name -> unified_name} remap
                         (e.g. LLVIP already uses "person", so identity).
+        trust_filename: Use each XML's own ``<filename>`` tag (LLVIP) vs.
+                        always deriving it from the XML's own stem (M3FD,
+                        whose ``<filename>`` tags are unreliable — see
+                        ``_parse_voc_xml``).
+        image_ext:      Extension to pair with the XML's own stem when
+                        ``trust_filename=False`` or the tag is missing.
 
     Returns:
         A COCO-format dict: {info, categories, images, annotations}.
@@ -169,7 +189,8 @@ def convert_voc_to_coco(
     n_neg = 0
 
     for xml_path in xml_files:
-        parsed = _parse_voc_xml(xml_path)
+        parsed = _parse_voc_xml(xml_path, trust_filename=trust_filename,
+                                 fallback_ext=image_ext)
         if parsed is None:
             continue
 
@@ -296,6 +317,57 @@ def convert_llvip(cfg: dict) -> dict:
     return coco
 
 
+# ── M3FD driver ──────────────────────────────────────────────────────────────
+def convert_m3fd(cfg: dict) -> dict:
+    """Convert the M3FD source into the unified COCO dict.
+
+    Unlike LLVIP, M3FD ships no official train/test split — the whole 4,200
+    pairs are converted un-tagged (``split_of=None``) and
+    ``split_dataset.py`` (with ``respect_official_test: false``) does a
+    fresh stratified split by ``split_ratios``.
+
+    M3FD's raw classes are People/Car/Bus/Motorcycle/Lamp/Truck. "Lamp" has
+    no unified equivalent and is intentionally left out of the source's
+    ``class_map`` — objects with an unmapped name are dropped (and counted
+    in the "[INFO] Skipped classes" log line) by ``convert_voc_to_coco``.
+    """
+    src_cfg = cfg["datasets"]["sources"]["m3fd"]
+    source_root = resolve(src_cfg["root"])
+    ann_dir = source_root / src_cfg["annotations_subdir"]
+    if not ann_dir.is_dir():
+        raise FileNotFoundError(
+            f"M3FD annotations dir not found: {ann_dir}\n"
+            f"Expected the dataset at {source_root}."
+        )
+
+    category_index = build_category_index(cfg)
+    categories = cfg["datasets"]["categories"]
+    native = tuple(cfg["datasets"].get("native_size", (1024, 768)))
+
+    # The config's m3fd.class_map is {raw_lowercase_name: unified_id};
+    # convert_voc_to_coco wants {raw_lowercase_name: unified_name} (it looks
+    # the id up itself via category_index), so translate id -> name here.
+    id_to_name = {c["id"]: c["name"] for c in categories}
+    class_alias = {
+        raw: id_to_name[uid]
+        for raw, uid in src_cfg.get("class_map", {}).items()
+        if uid in id_to_name
+    }
+
+    print(f"  Parsing VOC XML from: {ann_dir}")
+    coco = convert_voc_to_coco(
+        voc_dir=ann_dir,
+        category_index=category_index,
+        categories=categories,
+        split_of=None,
+        default_size=native,
+        class_alias=class_alias,
+        trust_filename=False,   # M3FD's <filename> tags are unreliable
+        image_ext=".png",
+    )
+    return coco
+
+
 # ── KAIST stub ───────────────────────────────────────────────────────────────
 def convert_kaist_to_coco(*_args, **_kwargs) -> dict:  # pragma: no cover
     """Convert KAIST Caltech-style TXT annotations to COCO (not yet needed)."""
@@ -379,6 +451,7 @@ def validate_coco_json(json_path: str | os.PathLike) -> bool:
 # ── CLI ──────────────────────────────────────────────────────────────────────
 _CONVERTERS = {
     "llvip": convert_llvip,
+    "m3fd": convert_m3fd,
     "kaist": convert_kaist_to_coco,
 }
 
