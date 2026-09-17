@@ -67,9 +67,12 @@ datasets:
     - {id: 6, name: "cyclist",    supercategory: "human"}
 
   # Image properties. M3FD native resolution is 1024x768; the model input
-  # size below is what the DataLoader resizes to (width, height).
+  # size below is what the DataLoader resizes to (width, height). Table 4
+  # specifies a square 640x640 input — since M3FD's native aspect (4:3)
+  # isn't square, the plain-resize pipeline (datasets/augmentations.py has
+  # no letterbox/pad step) will stretch images slightly to fit.
   native_size: [1024, 768]
-  image_size: [640, 512]
+  image_size: [640, 640]
 
   # Augmentation settings (consumed by datasets/augmentations.py).
   augmentation:
@@ -150,7 +153,7 @@ preprocessing:
 # ── Detection ──────────────────────────────────────────────────────────────
 detection:
   model: "yolov8m"                # Ultralytics model variant
-  input_size: [640, 512]          # match datasets.image_size (W, H)
+  input_size: [640, 640]          # match datasets.image_size (W, H)
   confidence_threshold: 0.25
   iou_threshold: 0.45
   num_classes: 6                  # Unified ids (the head stays 80-class COCO)
@@ -173,7 +176,7 @@ fusion:
     thermal_stem_init: "mean3ch"  # mean3ch | random
   train_schedule:
     stage1_freeze: ["visible_backbone", "neck", "head"]
-    stage1_epochs: 20
+    stage1_epochs: 150             # Table 4: 150 epochs
     stage2_unfreeze: ["neck", "head"]   # [] to skip stage 2
     stage2_lr: 1.0e-4
 
@@ -191,19 +194,28 @@ risk_model:
   temporal_window: 30             # Frames of history for behaviour analysis
 
 # ── Training ───────────────────────────────────────────────────────────────
+# Table 4 (reference "Experimental Setting"): SGD lr0=0.01, momentum=0.937,
+# weight_decay=0.0005, cosine decay to lr_final=1e-4 (lrf=0.01), 150 epochs,
+# batch 16, input 640x640, 8 workers, AMP off. Mosaic augmentation is NOT
+# implemented (would need real 4-image composition + box remapping across
+# both modalities, and the project's own Phase-5 doc flags it as
+# complicating the TRC-gating story) — HSV-equivalent jitter (color_jitter,
+# below) and horizontal flip are enabled instead.
 training:
   batch_size: 16
-  num_workers: 4
-  epochs: 100
-  learning_rate: 0.001
-  optimizer: "adamw"
+  num_workers: 8
+  epochs: 150
+  learning_rate: 0.01
+  optimizer: "sgd"
+  momentum: 0.937
+  lrf: 0.01                       # cosine floor = learning_rate * lrf (ultralytics convention)
   weight_decay: 0.0005
   grad_clip_norm: 10.0
   loss_gains: {box: 7.5, cls: 0.5, dfl: 1.5}   # ultralytics v8DetectionLoss defaults
   warmup_epochs: 3                # linear LR warmup (Stage 2)
   scheduler: "cosine"
   early_stopping_patience: 15
-  mixed_precision: true           # FP16 training via torch.cuda.amp
+  mixed_precision: false           # Table 4: AMP off
   log_dir: "runs/"
   checkpoint_dir: "weights/fusion/"
 

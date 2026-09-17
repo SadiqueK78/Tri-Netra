@@ -4,6 +4,7 @@ venv/
 # Dataset
 datasets/LLVIP/
 datasets/M3FD/
+datasets/*.zip
 datasets/thermal/
 datasets/visible/
 

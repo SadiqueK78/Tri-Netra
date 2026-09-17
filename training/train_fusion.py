@@ -31,6 +31,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import csv
 import math
 import subprocess
 import sys
@@ -143,6 +144,64 @@ def save_checkpoint(path: Path, model, opt, epoch: int, stage: int,
     }, path)
 
 
+# ── CSV log + plots ──────────────────────────────────────────────────────────
+_CSV_FIELDS = ["epoch", "box_loss", "cls_loss", "dfl_loss",
+               "val_mAP50", "val_mAP50_95", "lr", "epoch_time_s"]
+
+
+def plot_training_curves(csv_path: Path, out_path: Path) -> Optional[Path]:
+    """Render loss / mAP / LR curves from ``training_log.csv`` (best-effort —
+    a plotting failure should never take down a training run)."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        rows = []
+        with open(csv_path, "r", encoding="utf-8", newline="") as f:
+            for row in csv.DictReader(f):
+                rows.append({k: float(v) for k, v in row.items()})
+        if not rows:
+            return None
+        epochs = [r["epoch"] for r in rows]
+
+        fig, axes = plt.subplots(1, 3, figsize=(16, 4.5))
+
+        axes[0].plot(epochs, [r["box_loss"] for r in rows], label="box")
+        axes[0].plot(epochs, [r["cls_loss"] for r in rows], label="cls")
+        axes[0].plot(epochs, [r["dfl_loss"] for r in rows], label="dfl")
+        axes[0].set_title("Training loss")
+        axes[0].set_xlabel("epoch")
+        axes[0].legend()
+        axes[0].grid(alpha=0.3)
+
+        axes[1].plot(epochs, [r["val_mAP50"] for r in rows], label="mAP@0.5")
+        axes[1].plot(epochs, [r["val_mAP50_95"] for r in rows], label="mAP@0.5:0.95")
+        best_i = max(range(len(rows)), key=lambda i: rows[i]["val_mAP50"])
+        axes[1].scatter([epochs[best_i]], [rows[best_i]["val_mAP50"]],
+                        color="red", zorder=5, label="best mAP50")
+        axes[1].set_title("Validation mAP")
+        axes[1].set_xlabel("epoch")
+        axes[1].legend()
+        axes[1].grid(alpha=0.3)
+
+        axes[2].plot(epochs, [r["lr"] for r in rows], color="darkorange")
+        axes[2].set_title("Learning rate")
+        axes[2].set_xlabel("epoch")
+        axes[2].set_yscale("log")
+        axes[2].grid(alpha=0.3)
+
+        fig.tight_layout()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(out_path, dpi=150)
+        plt.close(fig)
+        print(f"  [OK] training curves -> {out_path}")
+        return out_path
+    except Exception as e:  # pragma: no cover
+        print(f"  [WARN] plot_training_curves failed ({e}); CSV log is still at {csv_path}")
+        return None
+
+
 # ── the generic training loop ────────────────────────────────────────────────
 def fit(
     model: torch.nn.Module,
@@ -164,10 +223,12 @@ def fit(
 ) -> dict:
     """Train ``model`` for one stage and return the best-checkpoint summary.
 
-    The loop is shared by all Phase-5 variants (fusion + baselines): AdamW on
-    trainable params only, cosine LR (optional linear warmup), AMP, grad
-    clipping, per-epoch val mAP via COCOeval, early stopping on mAP@0.5,
-    ``last.pt``/``best.pt`` checkpoints and TensorBoard scalars.
+    The loop is shared by all Phase-5 variants (fusion + baselines): AdamW or
+    SGD (``training.optimizer``) on trainable params only, cosine LR decaying
+    to ``lr * training.lrf`` (optional linear warmup), AMP, grad clipping,
+    per-epoch val mAP via COCOeval, early stopping on mAP@0.5, ``last.pt``/
+    ``best.pt`` checkpoints, TensorBoard scalars, a per-epoch CSV log
+    (``training_log.csv``), and a training-curves plot written on exit.
     """
     tcfg = cfg.get("training", {})
     class_map = get_class_id_map(cfg)
@@ -179,18 +240,30 @@ def fit(
     loss_fn = build_loss(model, cfg)
     startup_checks(model, loss_fn, train_loader, cfg, device)
 
-    opt = torch.optim.AdamW(trainable_params(model), lr=lr,
-                            weight_decay=float(tcfg.get("weight_decay", 5e-4)))
+    wd = float(tcfg.get("weight_decay", 5e-4))
+    opt_name = str(tcfg.get("optimizer", "adamw")).lower()
+    if opt_name == "sgd":
+        opt = torch.optim.SGD(trainable_params(model), lr=lr,
+                              momentum=float(tcfg.get("momentum", 0.937)),
+                              weight_decay=wd)
+    else:
+        opt = torch.optim.AdamW(trainable_params(model), lr=lr, weight_decay=wd)
+
+    # Ultralytics-style final-LR fraction: the cosine floor is lr * lrf, not
+    # PyTorch's CosineAnnealingLR default of 0 — e.g. lr=0.01, lrf=0.01 decays
+    # to 1e-4, not all the way to zero.
+    eta_min = lr * float(tcfg.get("lrf", 0.0))
     if warmup_epochs > 0:
         sched = torch.optim.lr_scheduler.SequentialLR(
             opt,
             [torch.optim.lr_scheduler.LinearLR(
                 opt, start_factor=0.1, total_iters=warmup_epochs),
              torch.optim.lr_scheduler.CosineAnnealingLR(
-                 opt, T_max=max(1, epochs - warmup_epochs))],
+                 opt, T_max=max(1, epochs - warmup_epochs), eta_min=eta_min)],
             milestones=[warmup_epochs])
     else:
-        sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, epochs))
+        sched = torch.optim.lr_scheduler.CosineAnnealingLR(
+            opt, T_max=max(1, epochs), eta_min=eta_min)
     scaler = torch.amp.GradScaler(enabled=amp)
 
     start_epoch, best_map = 0, -1.0
@@ -220,6 +293,15 @@ def fit(
     n_train, n_frozen = param_counts(model)
     print(f"\n=== fit: variant={variant} stage={stage} epochs={epochs} lr={lr:g} "
           f"amp={amp} ({n_train:,} trainable / {n_frozen:,} frozen) ===")
+
+    csv_path = out_dir / "training_log.csv"
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    write_header = not (resume and csv_path.exists())
+    csv_file = open(csv_path, "a" if not write_header else "w", newline="", encoding="utf-8")
+    csv_writer = csv.DictWriter(csv_file, fieldnames=_CSV_FIELDS)
+    if write_header:
+        csv_writer.writeheader()
+        csv_file.flush()
 
     bad_epochs, step = 0, start_epoch * len(train_loader)
     best_path, last_path = out_dir / "best.pt", out_dir / "last.pt"
@@ -254,14 +336,23 @@ def fit(
         sched.step()
         mean = (running / max(1, len(train_loader))).tolist()
         cur_lr = opt.param_groups[0]["lr"]
+        epoch_time = time.time() - t0
 
         metrics = evaluate(model, val_loader, cfg, device=device, trc_bins=False)
         map50, map5095 = metrics["mAP50"], metrics["mAP50_95"]
         if math.isnan(map50):
             map50 = 0.0
-        print(f"  epoch {epoch:03d} done in {time.time() - t0:.1f}s — "
+        map5095_log = 0.0 if math.isnan(map5095) else map5095
+        print(f"  epoch {epoch:03d} done in {epoch_time:.1f}s — "
               f"loss(box/cls/dfl)={mean[0]:.4f}/{mean[1]:.4f}/{mean[2]:.4f}  "
               f"val mAP50={map50:.4f} mAP50-95={map5095:.4f}  lr={cur_lr:.2e}")
+
+        csv_writer.writerow({
+            "epoch": epoch, "box_loss": mean[0], "cls_loss": mean[1], "dfl_loss": mean[2],
+            "val_mAP50": map50, "val_mAP50_95": map5095_log, "lr": cur_lr,
+            "epoch_time_s": round(epoch_time, 2),
+        })
+        csv_file.flush()
 
         if writer:
             writer.add_scalar("val/mAP50", map50, epoch)
@@ -289,8 +380,12 @@ def fit(
 
     if writer:
         writer.close()
+    csv_file.close()
+    plot_training_curves(csv_path, out_dir / "training_curves.png")
+
     return {"best_path": str(best_path), "last_path": str(last_path),
-            "best_map50": best_map, "variant": variant, "stage": stage,
+            "csv_path": str(csv_path), "variant": variant, "stage": stage,
+            "best_map50": best_map,
             "trainable_params": n_train}
 
 
