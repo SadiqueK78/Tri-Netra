@@ -40,6 +40,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from inference.predict_image import predict  # noqa: E402
+from utils.visualize_preproc import _degrade  # noqa: E402
 
 # Known clean-test-set numbers from the Phase-5 ablation (for on-screen context —
 # not recomputed live, just the headline figures already measured).
@@ -52,16 +53,33 @@ MODELS = {
 
 
 def build_app(config: str, device: str):
-    def run(visible_img, thermal_img, conf_threshold):
+    def run(visible_img, thermal_img, conf_threshold, simulate_stress):
         if visible_img is None or thermal_img is None:
-            return [None] * len(MODELS) + ["Please provide both a visible and a thermal image."]
+            return [None] + [None] * len(MODELS) + ["Please provide both a visible and a thermal image."]
+
+        import numpy as np
 
         outputs, notes = [], []
         with tempfile.TemporaryDirectory() as tmp:
             vis_path = Path(tmp) / "visible.png"
             thr_path = Path(tmp) / "thermal.png"
             visible_img.save(vis_path)
-            thermal_img.save(thr_path)
+
+            if simulate_stress:
+                # Same synthetic degradation used in the Phase-5 stress-test
+                # ablation (utils/visualize_preproc._degrade, "saturate" kind):
+                # a strong gain drives thermal pixels toward the ceiling plus a
+                # bloom blur, mimicking sensor overexposure. This is what
+                # dropped measured TRC from ~0.74 (clean) to ~0.40 (degraded)
+                # in the ablation study, and is where Fusion(TRC) showed its
+                # real, measured margin over Fusion(no TRC).
+                thr_arr = np.array(thermal_img.convert("L"))[:, :, None]
+                degraded = _degrade(thr_arr, "saturate")
+                from PIL import Image as PILImage
+                PILImage.fromarray(degraded[:, :, 0]).save(thr_path)
+                notes.append("*(thermal degradation simulated: sensor-saturation stress test)*")
+            else:
+                thermal_img.save(thr_path)
 
             from PIL import Image
             for name, (ckpt_rel, _) in MODELS.items():
@@ -80,11 +98,18 @@ def build_app(config: str, device: str):
                     outputs.append(None)
                     notes.append(f"**{name}**: failed ({e})")
 
-        return outputs + ["  \n".join(notes)]
+            thr_used = Image.open(thr_path).convert("L")
+
+        return [thr_used] + outputs + ["  \n".join(notes)]
 
     example_vis = PROJECT_ROOT / "datasets" / "LLVIP" / "visible" / "test" / "190001.jpg"
     example_thr = PROJECT_ROOT / "datasets" / "LLVIP" / "infrared" / "test" / "190001.jpg"
-    examples = [[str(example_vis), str(example_thr), 0.25]] if example_vis.exists() else None
+    examples = None
+    if example_vis.exists():
+        examples = [
+            [str(example_vis), str(example_thr), 0.25, False],  # clean: fusion variants tie
+            [str(example_vis), str(example_thr), 0.25, True],   # stressed: Fusion(TRC) wins
+        ]
 
     with gr.Blocks(title="TriNetra-AMRF — Four-Way Comparison") as demo:
         gr.Markdown(
@@ -97,8 +122,19 @@ def build_app(config: str, device: str):
         with gr.Row():
             visible_in = gr.Image(type="pil", label="Visible (RGB) image")
             thermal_in = gr.Image(type="pil", label="Thermal image (same scene)")
-        conf_slider = gr.Slider(0.05, 0.9, value=0.25, step=0.05, label="Confidence threshold")
+        with gr.Row():
+            conf_slider = gr.Slider(0.05, 0.9, value=0.25, step=0.05, label="Confidence threshold")
+            stress_toggle = gr.Checkbox(
+                value=False,
+                label="Simulate thermal degradation (sensor-saturation stress test)",
+                info="This is the actual synthetic corruption used in the Phase-5 ablation's "
+                     "stress test — the condition where Fusion(TRC) showed a real, measured "
+                     "margin over Fusion(no TRC). Leave unchecked to compare on clean data "
+                     "(where the two fusion variants are expected to tie).",
+            )
         run_btn = gr.Button("Run All Four Models", variant="primary")
+        thr_used_img = gr.Image(type="pil", label="Thermal input actually fed to the models",
+                                width=300)
 
         out_imgs = []
         with gr.Row():
@@ -108,10 +144,14 @@ def build_app(config: str, device: str):
                     out_imgs.append(gr.Image(type="pil", label=name, show_label=False))
         info_box = gr.Markdown()
 
-        run_btn.click(run, inputs=[visible_in, thermal_in, conf_slider],
-                      outputs=out_imgs + [info_box])
+        run_btn.click(run, inputs=[visible_in, thermal_in, conf_slider, stress_toggle],
+                      outputs=[thr_used_img] + out_imgs + [info_box])
         if examples:
-            gr.Examples(examples=examples, inputs=[visible_in, thermal_in, conf_slider])
+            gr.Examples(examples=examples,
+                       inputs=[visible_in, thermal_in, conf_slider, stress_toggle],
+                       label="Click either example, then press \"Run All Four Models\" — "
+                             "the first is clean (fusion variants should tie), the second "
+                             "simulates thermal degradation (Fusion(TRC) should pull ahead)")
 
     return demo
 
